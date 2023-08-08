@@ -1,12 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: MIT
-
 import io
 import os
 import sys
 import time
 import warnings
 import wave
+from contextlib import closing
 from pathlib import Path
 from typing import Callable, Dict, Generator, Iterable, List, Optional, TextIO, Union
 
@@ -17,8 +15,10 @@ import riva.client.proto.riva_asr_pb2 as rasr
 import riva.client.proto.riva_asr_pb2_grpc as rasr_srv
 from riva.client.auth import Auth
 
+from config import num_chars, num_chars_printed
 
-def get_wav_file_parameters(input_file: Union[str, os.PathLike]) -> Dict[str, Union[int, float]]:
+
+def get_wav_file_parameters(input_file: Union[str, os.PathLike]) -> Optional[Dict[str, Union[int, float]]]:
     try:
         input_file = Path(input_file).expanduser()
         with wave.open(str(input_file), 'rb') as wf:
@@ -32,7 +32,7 @@ def get_wav_file_parameters(input_file: Union[str, os.PathLike]) -> Dict[str, Un
                 'sampwidth': wf.getsampwidth(),
                 'data_offset': wf.getfp().size_read + wf.getfp().offset
             }
-    except:
+    except wave.Error:
         # Not a WAV file
         return None
     return parameters
@@ -53,7 +53,7 @@ class AudioChunkFileIterator:
         self.chunk_n_frames = chunk_n_frames
         self.delay_callback = delay_callback
         self.file_parameters = get_wav_file_parameters(self.input_file)
-        self.file_object: Optional[typing.BinaryIO] = open(str(self.input_file), 'rb')
+        self.file_object: Optional[io.BufferedIOBase] = open(str(self.input_file), 'rb')
         if self.delay_callback and self.file_parameters is None:
             warnings.warn(f"delay_callback not supported for encoding other than LINEAR_PCM")
             self.delay_callback = None
@@ -115,13 +115,12 @@ def add_audio_file_specs_to_config(
 
 
 def add_speaker_diarization_to_config(
-    config: Union[rasr.RecognitionConfig],
+    config: rasr.RecognitionConfig,
     diarization_enable: bool,
 ) -> None:
-    inner_config: rasr.RecognitionConfig = config if isinstance(config, rasr.RecognitionConfig) else config.config
     if diarization_enable:
         diarization_config = rasr.SpeakerDiarizationConfig(enable_speaker_diarization=True)
-        inner_config.diarization_config.CopyFrom(diarization_config)
+        config.diarization_config.CopyFrom(diarization_config)
 
 
 PRINT_STREAMING_ADDITIONAL_INFO_MODES = ['no', 'time', 'confidence']
@@ -159,11 +158,11 @@ def print_streaming(
             Available only if ``additional_info="time"``.
         show_intermediate (:obj:`bool`, defaults to :obj:`False`): If :obj:`True`, then partial transcripts are
             printed. If printing is performed to a stream (e.g. :obj:`sys.stdout`), then partial transcript is updated
-            on same line of a console. Available only if ``additional_info="no"``.
+            on the same line of a console. Available only if ``additional_info="no"``.
         file_mode (:obj:`str`, defaults to :obj:`"w"`): a mode in which files are opened.
 
     Raises:
-        :obj:`ValueError`: if wrong :param:`additional_info` value is passed to this function.
+        :obj:`ValueError`: if the wrong :param:`additional_info` value is passed to this function.
     """
     if additional_info not in PRINT_STREAMING_ADDITIONAL_INFO_MODES:
         raise ValueError(
@@ -193,7 +192,7 @@ def print_streaming(
                 file_opened[i] = True
                 output_file[i] = Path(elem).expanduser().open(file_mode)
         start_time = time.time()  # used in 'time` additional_info
-        num_chars_printed = 0  # used in 'no' additional_info
+        num_chars_printed = config.num_chars_printed  # used in 'no' additional_info
         for response in responses:
             if not response.results:
                 continue
@@ -208,7 +207,7 @@ def print_streaming(
                             overwrite_chars = ' ' * (num_chars_printed - len(transcript))
                             for i, f in enumerate(output_file):
                                 f.write("## " + transcript + (overwrite_chars if not file_opened[i] else '') + "\n")
-                            num_chars_printed = 0
+                            num_chars_printed = config.num_chars_printed
                         else:
                             for i, alternative in enumerate(result.alternatives):
                                 for f in output_file:
@@ -251,7 +250,7 @@ def print_streaming(
                     overwrite_chars = ' ' * (num_chars_printed - len(partial_transcript))
                     for i, f in enumerate(output_file):
                         f.write(">> " + partial_transcript + ('\n' if file_opened[i] else overwrite_chars + '\r'))
-                    num_chars_printed = len(partial_transcript) + 3
+                    num_chars_printed = len(partial_transcript) + config.num_chars
             elif additional_info == 'time':
                 for f in output_file:
                     if partial_transcript:
@@ -303,11 +302,11 @@ class ASRService:
         The purpose of the method is to perform speech recognition "online" - as soon as
         audio is acquired on small chunks of audio.
 
-        All available audio chunks will be sent to a server on first ``next()`` call.
+        All available audio chunks will be sent to a server on the first ``next()`` call.
 
         Args:
-            audio_chunks (:obj:`Iterable[bytes]`): an iterable object which contains raw audio fragments
-                of speech. For example, such raw audio can be obtained with
+            audio_chunks (:obj:`Iterable[bytes]`): an iterable object that contains raw audio fragments
+                of speech. For example, such raw audio can be obtained with:
 
                 .. code-block:: python
 
@@ -316,10 +315,10 @@ class ASRService:
                         raw_audio = wav_f.readframes(n_frames)
 
             streaming_config (:obj:`riva.client.proto.riva_asr_pb2.StreamingRecognitionConfig`): a config for streaming.
-                You may find description of config fields in message ``StreamingRecognitionConfig`` in
-                `common repo
+                You may find the description of config fields in message ``StreamingRecognitionConfig`` in
+                the `common repo
                 <https://docs.nvidia.com/deeplearning/riva/user-guide/docs/reference/protos/protos.html#riva-proto-riva-asr-proto>`_.
-                An example of creation of streaming config:
+                An example of the creation of streaming config:
 
                 .. code-style:: python
 
@@ -329,7 +328,7 @@ class ASRService:
 
         Yields:
             :obj:`riva.client.proto.riva_asr_pb2.StreamingRecognizeResponse`: responses for audio chunks in
-            :param:`audio_chunks`. You may find description of response fields in declaration of
+            :param:`audio_chunks`. You may find the description of response fields in the declaration of
             ``StreamingRecognizeResponse``
             message `here
             <https://docs.nvidia.com/deeplearning/riva/user-guide/docs/reference/protos/protos.html#riva-proto-riva-asr-proto>`_.
@@ -342,11 +341,11 @@ class ASRService:
         self, audio_bytes: bytes, config: rasr.RecognitionConfig, future: bool = False
     ) -> Union[rasr.RecognizeResponse, _MultiThreadedRendezvous]:
         """
-        Performs speech recognition for raw audio in :param:`audio_bytes`. This method is for processing of
+        Performs speech recognition for raw audio in :param:`audio_bytes`. This method is for the processing of
         huge audio at once - not as it is being generated.
 
         Args:
-            audio_bytes (:obj:`bytes`): a raw audio. For example it can be obtained with
+            audio_bytes (:obj:`bytes`): a raw audio. For example, it can be obtained with:
 
                 .. code-block:: python
 
@@ -355,25 +354,25 @@ class ASRService:
                         raw_audio = wav_f.readframes(n_frames)
 
             config (:obj:`riva.client.proto.riva_asr_pb2.RecognitionConfig`): a config for offline speech recognition.
-                You may find description of config fields in message ``RecognitionConfig`` in
-                `common repo
+                You may find the description of config fields in message ``RecognitionConfig`` in
+                the `common repo
                 <https://docs.nvidia.com/deeplearning/riva/user-guide/docs/reference/protos/protos.html#riva-proto-riva-asr-proto>`_.
-                An example of creation of config:
+                An example of the creation of config:
 
                 .. code-style:: python
 
                     from riva.client import RecognitionConfig
                     config = RecognitionConfig(enable_automatic_punctuation=True)
             future (:obj:`bool`, defaults to :obj:`False`): whether to return an async result instead of usual
-                response. You can get a response by calling ``result()`` method of the future object.
+                response. You can get a response by calling the ``result()`` method of the future object.
 
         Returns:
             :obj:`Union[riva.client.proto.riva_asr_pb2.RecognizeResponse, grpc._channel._MultiThreadedRendezvous]``: a
-            response with results of :param:`audio_bytes` processing. You may find description of response fields in
-            declaration of ``RecognizeResponse`` message `here
+            response with results of :param:`audio_bytes` processing. You may find the description of response fields in
+            the declaration of ``RecognizeResponse`` message `here
             <https://docs.nvidia.com/deeplearning/riva/user-guide/docs/reference/protos/protos.html#riva-proto-riva-asr-proto>`_.
             If :param:`future` is :obj:`True`, then a future object is returned. You may retrieve a response from a
-            future object by calling ``result()`` method.
+            future object by calling the ``result()`` method.
         """
         request = rasr.RecognizeRequest(config=config, audio=audio_bytes)
         func = self.stub.Recognize.future if future else self.stub.Recognize

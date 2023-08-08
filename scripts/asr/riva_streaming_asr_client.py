@@ -1,23 +1,35 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: MIT
-
 import argparse
 import os
 import queue
 import time
 from pathlib import Path
 from threading import Thread
-from typing import Union
+from typing import Union, NamedTuple, List, Optional, Generator
+from enum import Enum
 
 import riva.client
 from riva.client.asr import get_wav_file_parameters
 from riva.client.argparse_utils import add_asr_config_argparse_parameters, add_connection_argparse_parameters
 
+from config import NUM_CLIENTS, NUM_ITERATIONS, INPUT_FILE, SIMULATE_REALTIME, FILE_STREAMING_CHUNK, FILE_MODE, argument_default, time_sleep
+
+class AdditionalInfo(Enum):
+    NO = "no"
+    TIME = "time"
+    CONFIDENCE = "confidence"
+
+
+class StreamingTranscriptionWorkerArgs(NamedTuple):
+    args: argparse.Namespace
+    output_file: Path
+    thread_i: int
+    exception_queue: queue.Queue
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Streaming transcription via Riva AI Services. Unlike `scripts/asr/transcribe_file.py` script, "
-        "this script can perform transcription several times on same audio if `--num-iterations` is "
+        "this script can perform transcription several times on the same audio if `--num-iterations` is "
         "greater than 1. If `--num-clients` is greater than 1, then a file will be transcribed independently "
         "in several threads. Unlike other ASR scripts, this script does not print output but saves it in files "
         "which names follow a format `output_<thread_num>.txt`.",
@@ -35,7 +47,7 @@ def parse_args() -> argparse.Namespace:
         "normal speech.",
     )
     parser.add_argument(
-        "--file-streaming-chunk", type=int, default=1600, help="Number of frames in one chunk sent to server."
+        "--file-streaming-chunk", type=int, default=config.argument_default, help="Number of frames in one chunk sent to the server."
     )
     parser = add_connection_argparse_parameters(parser)
     parser = add_asr_config_argparse_parameters(parser, max_alternatives=True, profanity_filter=True, word_time_offsets=True)
@@ -45,10 +57,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def streaming_transcription_worker(
-    args: argparse.Namespace, output_file: Union[str, os.PathLike], thread_i: int, exception_queue: queue.Queue
-) -> None:
-    output_file = Path(output_file).expanduser()
+def streaming_transcription_worker(args: argparse.Namespace, output_file: Path, thread_i: int, exception_queue: queue.Queue) -> None:
     try:
         auth = riva.client.Auth(args.ssl_cert, args.use_ssl, args.server)
         asr_service = riva.client.ASRService(auth)
@@ -64,11 +73,11 @@ def streaming_transcription_worker(
             interim_results=True,
         )
         riva.client.add_word_boosting_to_config(config, args.boosted_lm_words, args.boosted_lm_score)
-        for _ in range(args.num_iterations):
+        for _ in range(args.config.NUM_ITERATIONS):
             with riva.client.AudioChunkFileIterator(
-                args.input_file,
-                args.file_streaming_chunk,
-                delay_callback=riva.client.sleep_audio_length if args.simulate_realtime else None,
+                args.config.INPUT_FILE,
+                args.config.FILE_STREAMING_CHUNK,
+                delay_callback=riva.client.sleep_audio_length if args.config.SIMULATE_REALTIME else None,
             ) as audio_chunk_iterator:
                 riva.client.print_streaming(
                     responses=asr_service.streaming_response_generator(
@@ -76,7 +85,7 @@ def streaming_transcription_worker(
                         streaming_config=config,
                     ),
                     output_file=output_file,
-                    additional_info='time',
+                    additional_info=AdditionalInfo.TIME,
                     file_mode='a',
                     word_time_offsets=args.word_time_offsets,
                 )
@@ -87,13 +96,13 @@ def streaming_transcription_worker(
 
 def main() -> None:
     args = parse_args()
-    print("Number of clients:", args.num_clients)
-    print("Number of iteration:", args.num_iterations)
-    print("Input file:", args.input_file)
-    threads = []
-    exception_queue = queue.Queue()
-    for i in range(args.num_clients):
-        t = Thread(target=streaming_transcription_worker, args=[args, f"output_{i:d}.txt", i, exception_queue])
+    print(f"Number of clients: {args.cofig.NUM_CLIENTS}")
+    print(f"Number of iterations: {args.config.NUM_ITERATIONS}")
+    print(f"Input file: {args.config.INPUT_FILE}")
+    threads: List[Thread] = []
+    exception_queue: queue.Queue = queue.Queue()
+    for i in range(args.cofig.NUM_CLIENTS):
+        t = Thread(target=streaming_transcription_worker, args=[args, Path(f"output_{i:d}.txt"), i, exception_queue])
         t.start()
         threads.append(t)
     while True:
@@ -111,8 +120,8 @@ def main() -> None:
                 break
         if all_dead:
             break
-        time.sleep(0.05)
-    print(str(args.num_clients), "threads done, output written to output_<thread_id>.txt")
+        time.sleep(config.time_sleep)
+    print(f"{args.cofig.NUM_CLIENTS} threads done, output written to output_<thread_id>.txt")
 
 
 if __name__ == "__main__":

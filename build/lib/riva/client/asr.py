@@ -1,6 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: MIT
-
 import io
 import os
 import sys
@@ -16,6 +13,23 @@ import riva.client
 import riva.client.proto.riva_asr_pb2 as rasr
 import riva.client.proto.riva_asr_pb2_grpc as rasr_srv
 from riva.client.auth import Auth
+
+import logging
+import inspect
+
+from config import riva_asr_config, num_chars_printed, num_chars
+
+# Configure logging with a custom log formatter
+log_format = '%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d:%(funcName)s - %(message)s'
+logging.basicConfig(filename='app.log', level=logging.DEBUG, format=log_format)
+
+# Helper function to log the print statement
+def log_print(*args, **kwargs):
+    message = " ".join(str(arg) for arg in args)
+    logging.debug(message)
+
+# Replace the print statements with log_print
+print = log_print
 
 
 def get_wav_file_parameters(input_file: Union[str, os.PathLike]) -> Dict[str, Union[int, float]]:
@@ -53,9 +67,9 @@ class AudioChunkFileIterator:
         self.chunk_n_frames = chunk_n_frames
         self.delay_callback = delay_callback
         self.file_parameters = get_wav_file_parameters(self.input_file)
-        self.file_object: Optional[typing.BinaryIO] = open(str(self.input_file), 'rb')
+        self.file_object: Optional[io.BufferedReader] = open(str(self.input_file), 'rb')
         if self.delay_callback and self.file_parameters is None:
-            warnings.warn(f"delay_callback not supported for encoding other than LINEAR_PCM")
+            warnings.warn("delay_callback not supported for encoding other than LINEAR_PCM")
             self.delay_callback = None
         self.first_buffer = True
 
@@ -159,7 +173,7 @@ def print_streaming(
             Available only if ``additional_info="time"``.
         show_intermediate (:obj:`bool`, defaults to :obj:`False`): If :obj:`True`, then partial transcripts are
             printed. If printing is performed to a stream (e.g. :obj:`sys.stdout`), then partial transcript is updated
-            on same line of a console. Available only if ``additional_info="no"``.
+            on the same line of a console. Available only if ``additional_info="no"``.
         file_mode (:obj:`str`, defaults to :obj:`"w"`): a mode in which files are opened.
 
     Raises:
@@ -208,7 +222,7 @@ def print_streaming(
                             overwrite_chars = ' ' * (num_chars_printed - len(transcript))
                             for i, f in enumerate(output_file):
                                 f.write("## " + transcript + (overwrite_chars if not file_opened[i] else '') + "\n")
-                            num_chars_printed = 0
+                            config.num_chars_printed = 0
                         else:
                             for i, alternative in enumerate(result.alternatives):
                                 for f in output_file:
@@ -251,7 +265,7 @@ def print_streaming(
                     overwrite_chars = ' ' * (num_chars_printed - len(partial_transcript))
                     for i, f in enumerate(output_file):
                         f.write(">> " + partial_transcript + ('\n' if file_opened[i] else overwrite_chars + '\r'))
-                    num_chars_printed = len(partial_transcript) + 3
+                    num_chars_printed = len(partial_transcript) + config.num_chars
             elif additional_info == 'time':
                 for f in output_file:
                     if partial_transcript:
@@ -303,10 +317,10 @@ class ASRService:
         The purpose of the method is to perform speech recognition "online" - as soon as
         audio is acquired on small chunks of audio.
 
-        All available audio chunks will be sent to a server on first ``next()`` call.
+        All available audio chunks will be sent to a server on the first ``next()`` call.
 
         Args:
-            audio_chunks (:obj:`Iterable[bytes]`): an iterable object which contains raw audio fragments
+            audio_chunks (:obj:`Iterable[bytes]`): an iterable object that contains raw audio fragments
                 of speech. For example, such raw audio can be obtained with
 
                 .. code-block:: python
@@ -316,10 +330,10 @@ class ASRService:
                         raw_audio = wav_f.readframes(n_frames)
 
             streaming_config (:obj:`riva.client.proto.riva_asr_pb2.StreamingRecognitionConfig`): a config for streaming.
-                You may find description of config fields in message ``StreamingRecognitionConfig`` in
-                `common repo
+                You may find a description of config fields in message ``StreamingRecognitionConfig`` in
+                `the common repo
                 <https://docs.nvidia.com/deeplearning/riva/user-guide/docs/reference/protos/protos.html#riva-proto-riva-asr-proto>`_.
-                An example of creation of streaming config:
+                An example of creating a streaming config:
 
                 .. code-style:: python
 
@@ -329,7 +343,7 @@ class ASRService:
 
         Yields:
             :obj:`riva.client.proto.riva_asr_pb2.StreamingRecognizeResponse`: responses for audio chunks in
-            :param:`audio_chunks`. You may find description of response fields in declaration of
+            :param:`audio_chunks`. You may find a description of response fields in the declaration of
             ``StreamingRecognizeResponse``
             message `here
             <https://docs.nvidia.com/deeplearning/riva/user-guide/docs/reference/protos/protos.html#riva-proto-riva-asr-proto>`_.
@@ -346,7 +360,7 @@ class ASRService:
         huge audio at once - not as it is being generated.
 
         Args:
-            audio_bytes (:obj:`bytes`): a raw audio. For example it can be obtained with
+            audio_bytes (:obj:`bytes`): a raw audio. For example, it can be obtained with
 
                 .. code-block:: python
 
@@ -355,25 +369,25 @@ class ASRService:
                         raw_audio = wav_f.readframes(n_frames)
 
             config (:obj:`riva.client.proto.riva_asr_pb2.RecognitionConfig`): a config for offline speech recognition.
-                You may find description of config fields in message ``RecognitionConfig`` in
-                `common repo
+                You may find a description of config fields in message ``RecognitionConfig`` in
+                `the common repo
                 <https://docs.nvidia.com/deeplearning/riva/user-guide/docs/reference/protos/protos.html#riva-proto-riva-asr-proto>`_.
-                An example of creation of config:
+                An example of creating a config:
 
                 .. code-style:: python
 
                     from riva.client import RecognitionConfig
                     config = RecognitionConfig(enable_automatic_punctuation=True)
-            future (:obj:`bool`, defaults to :obj:`False`): whether to return an async result instead of usual
-                response. You can get a response by calling ``result()`` method of the future object.
+            future (:obj:`bool`, defaults to :obj:`False`): whether to return an async result instead of the usual
+                response. You can get a response by calling the ``result()`` method of the future object.
 
         Returns:
             :obj:`Union[riva.client.proto.riva_asr_pb2.RecognizeResponse, grpc._channel._MultiThreadedRendezvous]``: a
-            response with results of :param:`audio_bytes` processing. You may find description of response fields in
-            declaration of ``RecognizeResponse`` message `here
+            response with results of :param:`audio_bytes` processing. You may find a description of response fields in
+            the declaration of ``RecognizeResponse`` message `here
             <https://docs.nvidia.com/deeplearning/riva/user-guide/docs/reference/protos/protos.html#riva-proto-riva-asr-proto>`_.
             If :param:`future` is :obj:`True`, then a future object is returned. You may retrieve a response from a
-            future object by calling ``result()`` method.
+            future object by calling the ``result()`` method.
         """
         request = rasr.RecognizeRequest(config=config, audio=audio_bytes)
         func = self.stub.Recognize.future if future else self.stub.Recognize
