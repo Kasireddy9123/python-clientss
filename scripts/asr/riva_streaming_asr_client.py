@@ -13,6 +13,20 @@ from riva.client.argparse_utils import add_asr_config_argparse_parameters, add_c
 
 from config import NUM_CLIENTS, NUM_ITERATIONS, INPUT_FILE, SIMULATE_REALTIME, FILE_STREAMING_CHUNK, FILE_MODE, argument_default, time_sleep
 
+import logging
+
+# Configure logging with a custom log formatter
+log_format = '%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d:%(funcName)s - %(message)s'
+logging.basicConfig(filename='app.log', level=logging.DEBUG, format=log_format)
+
+# Helper function to log the print statement
+def log_print(*args, **kwargs):
+    message = " ".join(str(arg) for arg in args)
+    logging.debug(message)
+
+# Replace the print statements with log_print
+print = log_print
+
 class AdditionalInfo(Enum):
     NO = "no"
     TIME = "time"

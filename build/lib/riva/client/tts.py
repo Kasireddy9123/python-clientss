@@ -5,7 +5,7 @@ import riva.client.proto.riva_tts_pb2_grpc as rtts_srv
 from riva.client import Auth
 from riva.client.proto.riva_audio_pb2 import AudioEncoding
 
-from config import riva_tts_config, sample_rate
+from tts_config import riva_tts_config, sample_rate
 
 
 class SpeechSynthesisService:
